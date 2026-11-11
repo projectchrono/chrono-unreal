@@ -1,0 +1,27 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "10.0.0",
+	"FriendlyName": "Chrono Core",
+	"Description": "Project Chrono 10.0.0 core multibody-dynamics module (chrono/, bundled Bullet/GIMPACT/HACD collision code and Eigen 5.0.0), compiled from source by UnrealBuildTool.",
+	"Category": "Physics",
+	"CreatedBy": "Project Chrono (projectchrono.org); Unreal integration by ChronoChaosTest",
+	"CreatedByURL": "https://projectchrono.org",
+	"DocsURL": "https://api.projectchrono.org",
+	"MarketplaceURL": "",
+	"SupportURL": "",
+	"CanContainContent": false,
+	"IsBetaVersion": false,
+	"IsExperimentalVersion": false,
+	"Installed": false,
+	"Modules": [
+		{
+			"Name": "ChronoCore",
+			"Type": "Runtime",
+			"LoadingPhase": "Default",
+			"PlatformAllowList": [
+				"Win64"
+			]
+		}
+	]
+}

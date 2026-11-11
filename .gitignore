@@ -1,0 +1,14 @@
+# Unreal build / generated
+Binaries/
+Intermediate/
+Saved/
+DerivedDataCache/
+.vs/
+*.pdb
+*.sln
+*.suo
+*.VC.db
+*.opensdf
+*.sdf
+# readmes
+README*.md

@@ -1,0 +1,198 @@
+// =============================================================================
+// PROJECT CHRONO - http://projectchrono.org
+//
+// Copyright (c) 2014 projectchrono.org
+// All rights reserved.
+//
+// Use of this source code is governed by a BSD-style license that can be found
+// in the LICENSE file at the top level of the distribution and at
+// http://projectchrono.org/license-chrono.txt.
+//
+// =============================================================================
+// Authors: Alessandro Tasora, Radu Serban
+// =============================================================================
+
+#ifndef CH_COLLISION_SYSTEM_BULLET_H
+#define CH_COLLISION_SYSTEM_BULLET_H
+
+// CHRONO-UE PATCH BEGIN
+#include <unordered_map>
+// CHRONO-UE PATCH END
+
+#include "chrono/collision/ChCollisionSystem.h"
+#include "chrono/collision/bullet/ChCollisionModelBullet.h"
+#include "chrono/collision/bullet/cbtBulletCollisionCommon.h"
+
+namespace chrono {
+
+// forward references
+class ChAssembly;
+class ChParticleCloud;
+
+/// @addtogroup collision_bullet
+/// @{
+
+/// Collision engine based on the Bullet library.
+/// Contains both the broadphase and the narrow phase Bullet methods.
+class ChApi ChCollisionSystemBullet : public ChCollisionSystem {
+  public:
+    ChCollisionSystemBullet();
+    virtual ~ChCollisionSystemBullet();
+
+    /// Clears all data instanced by this algorithm
+    /// if any (like persistent contact manifolds)
+    virtual void Clear() override;
+
+    /// Add the specified collision model to the collision engine.
+    virtual void Add(std::shared_ptr<ChCollisionModel> model) override;
+
+    /// Remove the specified collision model from the collision engine.
+    virtual void Remove(std::shared_ptr<ChCollisionModel> model) override;
+
+    /// Removes all collision models from the collision
+    /// engine (custom data may be deallocated).
+    // virtual void RemoveAll();
+
+    /// Set the number of OpenMP threads for collision detection.
+    virtual void SetNumThreads(int nthreads) override;
+
+    /// Run the algorithm and finds all the contacts.
+    /// (Contacts will be managed by the Bullet persistent contact cache).
+    virtual void Run() override;
+
+    /// Return an AABB bounding all collision shapes in the system.
+    virtual ChAABB GetBoundingBox() const override;
+
+    /// Reset timers for collision detection.
+    virtual void ResetTimers() override;
+
+    /// Return the time (in seconds) for broadphase collision detection.
+    virtual double GetTimerCollisionBroad() const override;
+
+    /// Return the time (in seconds) for narrowphase collision detection.
+    virtual double GetTimerCollisionNarrow() const override;
+
+    /// Report contacts (fill the provided 'contact container').
+    /// This function, which should only be called after `Run()`, must add to the contact container contacts
+    /// corresponding to all detected pairwise collisions.
+    virtual void ReportContacts(ChContactContainer* contact_container) override;
+
+    /// Report proximities (fill in the provided 'proximity container').
+    /// This function, which should only be called after `Run()`, must add to the contact container contacts
+    /// corresponding to all detected pairwise collisions.
+    virtual void ReportProximities(ChProximityContainer* proximity_container) override;
+
+    /// Perform a ray-hit test with all collision models.
+    virtual bool RayHit(const ChVector3d& from, const ChVector3d& to, ChRayhitResult& result) const override;
+
+    /// Perform a ray-hit test with the specified collision model.
+    virtual bool RayHit(const ChVector3d& from,
+                        const ChVector3d& to,
+                        ChCollisionModel* model,
+                        ChRayhitResult& result) const override;
+    
+    /// !!! NEXT GEN CARS BEGIN
+    virtual bool ShapeOverlap(std::shared_ptr<ChCollisionModelBullet> queryModel,
+        ChRayhitResult& result,
+        const ChVector3d& traceLocation,
+        short filterGroup,
+        short filterMask) const;
+    /// !!! NEXT GEN CARS END
+
+    // CHRONO-UE PATCH BEGIN: backend-agnostic discrete shape contact query (see Plugins/ChronoCore/PATCHES.md)
+    /// Discrete contact test of a stand-alone collision model (not added to this system) placed at the given
+    /// absolute frame against all collision objects in the Bullet world. The Bullet representation of the query
+    /// model is created on first use and cached (it is refreshed when the model's shapes change).
+    virtual bool ShapeContactTest(ChCollisionModel& query_model,
+                                  const ChFrame<>& frame,
+                                  std::vector<ChContactQueryHit>& hits,
+                                  short int filter_group = 1,
+                                  short int filter_mask = -1) const override;
+    // CHRONO-UE PATCH END
+
+    /// Specify a callback object to be used for debug rendering of collision shapes.
+    virtual void RegisterVisualizationCallback(std::shared_ptr<VisualizationCallback> callback) override;
+
+    /// Method to trigger debug visualization of collision shapes.
+    /// The 'flags' argument can be any of the VisualizationModes enums, or a combination thereof (using bit-wise
+    /// operators). The calling program must invoke this function from within the simulation loop. No-op if a
+    /// visualization callback was not specified with RegisterVisualizationCallback().
+    virtual void Visualize(int flags) override;
+
+    /// Get the underlying Bullet collision world.
+    cbtCollisionWorld* GetBulletCollisionWorld() { return bt_collision_world; }
+
+    /// Change default contact breaking/merging threshold tolerance of Bullet.
+    /// This is the static gContactBreakingThreshold scalar in Bullet.
+    /// Call this function only once, before running the simulation.
+    static void SetContactBreakingThreshold(double threshold);
+
+    /// Method to allow serialization of transient data to archives.
+    virtual void ArchiveOut(ChArchiveOut& archive_out) override;
+
+    /// Method to allow deserialization of transient data from archives.
+    virtual void ArchiveIn(ChArchiveIn& archive_in) override;
+
+    // CHRONO-UE PATCH BEGIN: filtered ray casts are public (terrain sensing by collision family, see PATCHES.md)
+    /// Perform a ray-hit test with all collision models. This version allows specifying the Bullet
+    /// collision filter group and mask (see cbtBroadphaseProxy::CollisionFilterGroups).
+    bool RayHit(const ChVector3d& from,
+                const ChVector3d& to,
+                ChRayhitResult& result,
+                short int filter_group,
+                short int filter_mask) const;
+
+    /// Perform a ray-hit test with the specified collision model. This version allows specifying the Bullet
+    /// collision filter group and mask (see cbtBroadphaseProxy::CollisionFilterGroups).
+    bool RayHit(const ChVector3d& from,
+                const ChVector3d& to,
+                ChCollisionModel* model,
+                ChRayhitResult& result,
+                short int filter_group,
+                short int filter_mask) const;
+    // CHRONO-UE PATCH END
+
+  protected:
+
+    /// Remove the specified Bullet model from this collision system.
+    /// If erase=true, also remove from the bt_models list.
+    void Remove(ChCollisionModelBullet* bt_model, bool erase);
+
+    std::vector<std::shared_ptr<ChCollisionModelBullet>> bt_models;
+
+    cbtCollisionConfiguration* bt_collision_configuration;
+    cbtCollisionDispatcher* bt_dispatcher;
+    cbtBroadphaseInterface* bt_broadphase;
+    cbtCollisionWorld* bt_collision_world;
+
+    cbtCollisionAlgorithmCreateFunc* m_collision_capsule_box;
+    cbtCollisionAlgorithmCreateFunc* m_collision_box_capsule;
+    cbtCollisionAlgorithmCreateFunc* m_collision_cylshell_box;
+    cbtCollisionAlgorithmCreateFunc* m_collision_box_cylshell;
+    cbtCollisionAlgorithmCreateFunc* m_collision_arc_seg;
+    cbtCollisionAlgorithmCreateFunc* m_collision_seg_arc;
+    cbtCollisionAlgorithmCreateFunc* m_collision_arc_arc;
+    cbtCollisionAlgorithmCreateFunc* m_collision_chtri_chtri;
+    cbtCollisionAlgorithmCreateFunc* m_collision_seg_seg;
+
+    void* m_tmp_mem;
+    cbtCollisionAlgorithmCreateFunc* m_emptyCreateFunc;
+
+    cbtIDebugDraw* m_debug_drawer;
+
+    // CHRONO-UE PATCH BEGIN: cached Bullet representations of ShapeContactTest() query models
+    struct QueryModelCache {
+        std::shared_ptr<ChCollisionModelBullet> bt_model;
+        unsigned int num_shapes;
+    };
+    mutable std::unordered_map<const ChCollisionModel*, QueryModelCache> m_query_models;
+    // CHRONO-UE PATCH END
+
+    friend class ChCollisionModelBullet;
+};
+
+/// @} collision_bullet
+
+}  // end namespace chrono
+
+#endif

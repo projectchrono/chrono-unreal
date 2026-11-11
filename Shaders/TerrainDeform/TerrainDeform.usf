@@ -1,0 +1,298 @@
+#include "/Engine/Public/Platform.ush"
+
+// Height delta is a signed integer in 0.01 mm units (0.001 cm), stored toroidally.
+// (Fine units matter: the berm deposit of one texel is split over many samples, and many texels land on the same spot.)
+#define DELTA_PER_CM 1000.0f
+
+// Footprint wall softness (fraction of the footprint used by the slope) and berm layout.
+#define WALL_SOFTNESS 0.3f
+// The displaced soil is spread over BERM_SAMPLES points on a continuous lateral profile that starts at the contour
+// (BERM_START x the half extent) and ends BERM_SPREAD x the half extent further out. Each point is splatted bilinearly,
+// so the berm does not depend on the texel grid (nearest-texel rings left parallel stripes and per-frame ticks).
+#define BERM_SAMPLES 24
+#define BERM_START 1.0f
+#define BERM_SPREAD 2.4f
+// Cumulative weights of the profile w(t) = smoothstep(t / 0.35) * (1 - t)^1.5 at t = (k + 0.5) / BERM_SAMPLES, normalised to 1.
+// Differences of the rounded cumulative amounts give the per-sample integer parts, so the deposit is conserved exactly.
+static const float BermCumulative[BERM_SAMPLES] = {
+	0.001655f, 0.014343f, 0.044275f, 0.093478f, 0.160637f, 0.241896f, 0.331604f, 0.423023f, 0.509009f, 0.586811f, 0.656707f, 0.718984f,
+	0.773941f, 0.821890f, 0.863157f, 0.898086f, 0.927039f, 0.950401f, 0.968589f, 0.982054f, 0.991295f, 0.996881f, 0.999485f, 1.000000f };
+
+RWTexture2D<int> DeltaTex;
+RWTexture2D<float> HeightOut;
+RWTexture2D<float4> NormalOut;
+
+uint WindowSize;
+float TexelSize;
+int2 TileOrigin;   // absolute texel coords of the tile's min corner
+int2 TileSize;
+
+// Stamp
+float2 StampCenter;
+float2 StampForward;
+float StampHalfLength;
+float StampHalfWidth;
+float StampSinkage;
+float StampSegmentHalf;
+float StampPathStart;  // distance travelled by this source at the start of the swept segment (cm)
+float TreadDepth;      // cm the lugs press below the track floor (0 = no tread)
+float TreadWidthCm;    // physical width the tread texture spans across the tyre
+float TreadRepeatCm;   // physical length of one repeat of the tread texture along the path
+Texture2D TreadTexture;
+SamplerState TreadSampler;
+RWTexture2D<int> CoarseDelta;   // only bound for InitFromCoarseCS
+uint CoarseWindowSize;
+float CoarseTexelSize;
+float Compression;   // fraction of displaced volume that is lost (0 = exactly volume preserving)
+float ForwardBias;     // 0..1: how much of the berm may go along the rolling direction (1 = all directions equally)
+int ReposeThreshold;   // max height step between neighbours, in delta units
+
+uint2 Wrap(int2 AbsTexel)
+{
+	int N = (int)WindowSize;
+	return uint2(((AbsTexel.x % N) + N) % N, ((AbsTexel.y % N) + N) % N);
+}
+
+[numthreads(8, 8, 1)]
+void StampCS(uint3 DTid : SV_DispatchThreadID)
+{
+	if (any((int2)DTid.xy >= TileSize))
+	{
+		return;
+	}
+
+	int2 AbsTexel = TileOrigin + (int2)DTid.xy;
+	float2 World = (float2(AbsTexel) + 0.5f) * TexelSize;
+	float2 Rel = World - StampCenter;
+	float2 Right = float2(-StampForward.y, StampForward.x);
+	float2 Local = float2(dot(Rel, StampForward), dot(Rel, Right));
+	// Swept footprint: the shape is dragged along Forward over +-StampSegmentHalf, so travel between frames
+	// leaves a continuous track instead of one imprint per frame.
+	float2 SweptLocal = float2(sign(Local.x) * max(abs(Local.x) - StampSegmentHalf, 0.0f), Local.y);
+	float2 Norm = SweptLocal / float2(StampHalfLength, StampHalfWidth);
+	// Rounded-rectangle (superellipse, n = 4) contact patch: |u|^4 + |v|^4 < 1.
+	float2 N2 = Norm * Norm;
+	float E = dot(N2, N2);
+	if (E >= 1.0f)
+	{
+		return;
+	}
+
+	// Flat bottom with walls whose steepness is set by WALL_SOFTNESS (fraction of the footprint used by the wall).
+	float Wall = saturate((1.0f - E) / WALL_SOFTNESS);
+	Wall = Wall * Wall * (3.0f - 2.0f * Wall);
+	int Target = -(int)round(StampSinkage * Wall * DELTA_PER_CM);
+	int Orig;
+	InterlockedMin(DeltaTex[Wrap(AbsTexel)], Target, Orig);
+
+	// Whatever this texel lost is pushed out to the footprint contour (volume preserving, paper method 2/3).
+	int Removed = Orig - Target;
+	if (Removed <= 0)
+	{
+		return;
+	}
+	int Deposit = Removed - (int)((float)Removed * Compression);
+
+	float Len = length(Norm);
+	float2 Dir = Len > 0.05f ? Norm / Len : float2(0.0f, 1.0f);
+	float2 D2 = Dir * Dir;
+	// Distance (in unit-direction steps) from the centre to the superellipse boundary along Dir.
+	float BoundaryScale = 1.0f / sqrt(sqrt(dot(D2, D2)));
+	float SideSign = Local.y >= 0.0f ? 1.0f : -1.0f;
+
+	// Spread the deposit over a smooth lateral profile (see BERM_SAMPLES) instead of a few discrete rings.
+	int Spent = 0;
+
+	[loop]
+	for (int i = 0; i < BERM_SAMPLES; ++i)
+	{
+		float R = BERM_START + BERM_SPREAD * (((float)i + 0.5f) / (float)BERM_SAMPLES);
+		// ForwardBias 1: nearest point on the contour (radial). 0: straight out to the sides at the same track position,
+		// like a rolling tyre bulging soil sideways instead of bulldozing it ahead.
+		float2 Radial = Dir * (BoundaryScale * R) * float2(StampHalfLength, StampHalfWidth);
+		float2 Sideways = float2(Local.x, SideSign * R * StampHalfWidth);
+		float2 Lc = lerp(Sideways, Radial, ForwardBias);
+		float2 Wp = StampCenter + StampForward * Lc.x + Right * Lc.y;
+
+		int Cumulative = (i == BERM_SAMPLES - 1) ? Deposit : (int)round((float)Deposit * BermCumulative[i]);
+		int Part = Cumulative - Spent;
+		Spent = Cumulative;
+
+		// Bilinear splat between the four texel centres around the point; the rounding error goes to the last corner.
+		float2 F = Wp / TexelSize - 0.5f;
+		int2 T0 = (int2)floor(F);
+		float2 A = F - float2(T0);
+		int P00 = (int)round((float)Part * (1.0f - A.x) * (1.0f - A.y));
+		int P10 = (int)round((float)Part * A.x * (1.0f - A.y));
+		int P01 = (int)round((float)Part * (1.0f - A.x) * A.y);
+		int P11 = Part - P00 - P10 - P01;
+		InterlockedAdd(DeltaTex[Wrap(T0)], P00);
+		InterlockedAdd(DeltaTex[Wrap(T0 + int2(1, 0))], P10);
+		InterlockedAdd(DeltaTex[Wrap(T0 + int2(0, 1))], P01);
+		InterlockedAdd(DeltaTex[Wrap(T0 + int2(1, 1))], P11);
+	}
+}
+
+// Real tread from the baked texture. s = distance along the path (cm), v = offset across the tyre (cm).
+// Returns 1 where a lug presses into the soil, 0 in the grooves (and outside the tread width).
+float TreadLug(float s, float v)
+{
+	// The texture spans the whole tread, i.e. the tyre width this stamp represents.
+	float U = v / (2.0f * StampHalfWidth) + 0.5f;
+	if (U < 0.0f || U > 1.0f)
+	{
+		return 0.0f;
+	}
+	return TreadTexture.SampleLevel(TreadSampler, float2(U, s / TreadRepeatCm), 0).r;
+}
+
+// Presses the tread into the track floor, after relaxation so the detail isn't smoothed away.
+// Only texels the contact patch centre passed this frame get tread, anchored to path distance.
+// Tread compaction is not volume tracked (it is tiny and would otherwise need its own berm).
+[numthreads(8, 8, 1)]
+void TreadCS(uint3 DTid : SV_DispatchThreadID)
+{
+	if (any((int2)DTid.xy >= TileSize) || TreadDepth <= 0.0f || StampSegmentHalf <= 0.0f)
+	{
+		return;
+	}
+
+	int2 AbsTexel = TileOrigin + (int2)DTid.xy;
+	float2 World = (float2(AbsTexel) + 0.5f) * TexelSize;
+	float2 Rel = World - StampCenter;
+	float2 Right = float2(-StampForward.y, StampForward.x);
+	float2 Local = float2(dot(Rel, StampForward), dot(Rel, Right));
+	if (abs(Local.x) > StampSegmentHalf)
+	{
+		return;
+	}
+
+	float Across = Local.y / StampHalfWidth;
+	float E = Across * Across * Across * Across;
+	if (E >= 1.0f)
+	{
+		return;
+	}
+	float Wall = saturate((1.0f - E) / WALL_SOFTNESS);
+	Wall = Wall * Wall * (3.0f - 2.0f * Wall);
+
+	float S = StampPathStart + StampSegmentHalf + Local.x;
+	float Lug = TreadLug(S, Local.y);
+
+	// Overwrite, don't accumulate: a tyre imprints its own tread onto the soil under it, replacing the previous
+	// pass's imprint. (Taking the deeper value would union every pass's lugs at shifting phases and wash the
+	// pattern out to a flat floor.) Only touch texels within the band this pass's tread can reach, so ground
+	// that an earlier pass sank deeper is left alone.
+	int Floor = -(int)round(StampSinkage * Wall * DELTA_PER_CM);
+	int Target = Floor - (int)round(TreadDepth * Lug * Wall * DELTA_PER_CM);
+	int Limit = Floor - (int)round(TreadDepth * DELTA_PER_CM);
+	uint2 Texel = Wrap(AbsTexel);
+	if (DeltaTex[Texel] >= Limit)
+	{
+		DeltaTex[Texel] = Target;
+	}
+}
+
+// Angle-of-repose relaxation. Each transfer is a paired atomic subtract/add, so volume is conserved.
+[numthreads(8, 8, 1)]
+void RelaxCS(uint3 DTid : SV_DispatchThreadID)
+{
+	if (any((int2)DTid.xy >= TileSize))
+	{
+		return;
+	}
+
+	int2 Local = (int2)DTid.xy;
+	int2 AbsTexel = TileOrigin + Local;
+	uint2 Me = Wrap(AbsTexel);
+	int H = DeltaTex[Me];
+
+	static const int2 Offsets[4] = { int2(1, 0), int2(-1, 0), int2(0, 1), int2(0, -1) };
+	[unroll]
+	for (int i = 0; i < 4; ++i)
+	{
+		int2 NLocal = Local + Offsets[i];
+		if (any(NLocal < 0) || any(NLocal >= TileSize))
+		{
+			continue;
+		}
+		uint2 Nb = Wrap(TileOrigin + NLocal);
+		int Diff = H - DeltaTex[Nb];
+		// Only soil above the original surface (berms) slumps; cut trench floors and walls keep their detail.
+		if (H > 0 && Diff > ReposeThreshold)
+		{
+			int Move = (Diff - ReposeThreshold) / 8;
+			if (Move > 0)
+			{
+				InterlockedAdd(DeltaTex[Me], -Move);
+				InterlockedAdd(DeltaTex[Nb], Move);
+			}
+		}
+	}
+}
+
+uint2 WrapCoarse(int2 AbsTexel)
+{
+	int N = (int)CoarseWindowSize;
+	return uint2(((AbsTexel.x % N) + N) % N, ((AbsTexel.y % N) + N) % N);
+}
+
+// Seeds a rectangle of the fine layer from the coarse layer (bilinear), so the fine window keeps old tracks
+// when it scrolls onto them instead of showing flat ground.
+[numthreads(8, 8, 1)]
+void InitFromCoarseCS(uint3 DTid : SV_DispatchThreadID)
+{
+	if (any((int2)DTid.xy >= TileSize))
+	{
+		return;
+	}
+
+	int2 AbsTexel = TileOrigin + (int2)DTid.xy;
+	float2 World = (float2(AbsTexel) + 0.5f) * TexelSize;
+	float2 C = World / CoarseTexelSize - 0.5f;
+	int2 C0 = (int2)floor(C);
+	float2 F = C - float2(C0);
+	float V00 = (float)CoarseDelta[WrapCoarse(C0)];
+	float V10 = (float)CoarseDelta[WrapCoarse(C0 + int2(1, 0))];
+	float V01 = (float)CoarseDelta[WrapCoarse(C0 + int2(0, 1))];
+	float V11 = (float)CoarseDelta[WrapCoarse(C0 + int2(1, 1))];
+	float V = lerp(lerp(V00, V10, F.x), lerp(V01, V11, F.x), F.y);
+	DeltaTex[Wrap(AbsTexel)] = (int)round(V);
+}
+
+[numthreads(8, 8, 1)]
+void ClearCS(uint3 DTid : SV_DispatchThreadID)
+{
+	if (any((int2)DTid.xy >= TileSize))
+	{
+		return;
+	}
+	DeltaTex[Wrap(TileOrigin + (int2)DTid.xy)] = 0;
+}
+
+float LoadHeight(int2 AbsTexel)
+{
+	return (float)DeltaTex[Wrap(AbsTexel)] / DELTA_PER_CM;
+}
+
+[numthreads(8, 8, 1)]
+void ResolveCS(uint3 DTid : SV_DispatchThreadID)
+{
+	if (any((int2)DTid.xy >= TileSize))
+	{
+		return;
+	}
+
+	int2 AbsTexel = TileOrigin + (int2)DTid.xy;
+	float H = LoadHeight(AbsTexel);
+	float HL = LoadHeight(AbsTexel + int2(-1, 0));
+	float HR = LoadHeight(AbsTexel + int2(1, 0));
+	float HD = LoadHeight(AbsTexel + int2(0, -1));
+	float HU = LoadHeight(AbsTexel + int2(0, 1));
+
+	float3 N = normalize(float3(-(HR - HL), -(HU - HD), 2.0f * TexelSize));
+
+	uint2 Out = Wrap(AbsTexel);
+	HeightOut[Out] = H;
+	NormalOut[Out] = float4(N.xy * 0.5f + 0.5f, 0.0f, 1.0f);
+}

@@ -1,0 +1,240 @@
+// =============================================================================
+// PROJECT CHRONO - http://projectchrono.org
+//
+// Copyright (c) 2014 projectchrono.org
+// All rights reserved.
+//
+// Use of this source code is governed by a BSD-style license that can be found
+// in the LICENSE file at the top level of the distribution and at
+// http://projectchrono.org/license-chrono.txt.
+//
+// =============================================================================
+// Authors: Alessandro Tasora, Radu Serban
+// =============================================================================
+
+#ifndef CHLINKGEAR_H
+#define CHLINKGEAR_H
+
+#include "chrono/physics/ChLinkLock.h"
+
+namespace chrono {
+
+/// Gear link between two rigid bodies. This can
+/// also be used to represent spur and bevel gears, and
+/// it correctly handles the direction of transmitted force
+/// given the teeth pressure angle.
+
+class ChApi ChLinkLockGear : public ChLinkLock {
+  protected:
+    double tau;       ///< transmission coeff.
+    double alpha;     ///< inclination of action line
+    double beta;      ///< helix angle
+    double phase;     ///< mounting phase angle
+    bool checkphase;  ///< keep gear always on phase
+    bool epicyclic;   ///< epiciclyc (gear 1 is internal to gear2)  if true.
+    bool phase_setup_needed;
+
+    double a1;  ///< auxiliary
+    double a2;  ///< auxiliary
+    double r1;  ///< auxiliary
+    double r2;  ///< auxiliary
+
+    ChVector3d contact_pt;
+
+    ChFrame<double> local_shaft1;  ///< shaft1 pos & dir (as Z axis), relative to body1
+    ChFrame<double> local_shaft2;  ///< shaft2 pos & dir (as Z axis), relative to body2
+
+    bool is_compliant;
+    double teeth_stiffness;
+    double teeth_damping;
+
+  public:
+    ChLinkLockGear();
+    ChLinkLockGear(const ChLinkLockGear& other);
+    virtual ~ChLinkLockGear() {}
+
+    /// "Virtual" copy constructor (covariant return type).
+    virtual ChLinkLockGear* Clone() const override { return new ChLinkLockGear(*this); }
+
+    // Updates motion laws, marker positions, etc.
+    virtual void Update(double time, UpdateFlags update_flags) override;
+
+    /// Get the transmission ratio. Its value is assumed always positive,
+    /// both for inner and outer gears (so use GetEpicyclic() to distinguish)
+    double GetTransmissionRatio() const { return tau; }
+
+    /// Set the transmission ratio. Its value is assumed always positive,
+    /// both for inner and outer gears (so use SetEpicyclic() to distinguish)
+    void SetTransmissionRatio(double mset) { tau = fabs(mset); }
+
+    /// Set the transmission ratio given the number of teeth (or radius) of 1st gear
+    /// and the number of teeth (or radius) of 2nd gear
+    void SetTransmissionRatio(double mz1, double mz2) { tau = fabs(mz1 / mz2); }
+
+    /// Get the pressure angle, in [rad] (usually 20 [deg] for typical gears, default null)
+    double GetPressureAngle() const { return alpha; }
+
+    /// Set the pressure angle, in [rad] (usually 20 [deg] for typical gears, default null)
+    void SetPressureAngle(double mset) { alpha = mset; }
+
+    /// Get the helix angle of teeth in helicoidal gears, in [rad] (null for spur gears, default)
+    double GetPitchAngle() const { return beta; }
+
+    /// Set the helix angle of teeth in helicoidal gears, in [rad] (null for spur gears, default)
+    void SetPitchAngle(double mset) { beta = mset; }
+
+    /// Get the initial phase of rotation of gear A respect to gear B
+    double GetPhase() const { return phase; }
+
+    /// Set the initial phase of rotation of gear A respect to gear B
+    void SetPhase(double mset) { phase = mset; }
+
+    /// If SetEnforcePhase(true) but you do not know the correct initial phase to
+    /// be used in SetPhase(), call this function once at setup, and later this object 
+    /// will automatically compute the correct phase at first time that an Update() is done.
+    void SetPhaseAutomatically() { this->phase_setup_needed = true; }
+
+    /// If true, the bigger wheel has inner (internal) teeth
+    bool GetEpicyclic() const { return epicyclic; }
+
+    /// If true, the bigger wheel has inner (internal) teeth
+    void SetEpicyclic(bool mset) { epicyclic = mset; }
+
+    /// If true, enforce check on exact phase between gears
+    /// (otherwise after many simulation steps the phasing
+    /// may be affected by numerical error accumulation).
+    /// By default, it is turned off.
+    /// Note that, to ensure the correct phasing during the many
+    /// rotations, an algorithm will use the a1 and a2 total rotation
+    /// values, which might be affected by loss of numerical precision
+    /// after few thousands of revolutions, so this is NOT suited to
+    /// real-time simulators which must run for many hours.
+    void SetEnforcePhase(bool mset) { checkphase = mset; }
+
+    bool GetEnforcePhase() const { return checkphase; }
+
+    /// Get total rotation of 1st gear, respect to interaxis, in radians
+    double GetRotation1() const { return a1; }
+
+    /// Get total rotation of 2nd gear, respect to interaxis, in radians
+    double GetRotation2() const { return a2; }
+
+    /// Reset the total rotations of a1 and a2.
+    void ResetRotations() { a1 = a2 = 0; }
+
+    /// Get radius of 1st gear (depends on axis position and t.ratio)
+    double GetRadius1() const { return r1; }
+
+    /// Get radius of 2nd gear (depends on axis position and t.ratio)
+    double GetRadius2() const { return r2; }
+
+    /// Get shaft position and direction, for 1st gear, in body1-relative reference.
+    /// The shaft direction is the Z axis of that frame.
+    const ChFrame<double>& GetFrameShaft1() const { return local_shaft1; }
+
+    /// Set shaft position and direction, for 1st gear, in body1-relative reference.
+    /// The shaft direction is the Z axis of that frame.
+    /// Note that the origin of shaft position may be automatically shifted along
+    /// shaft direction in order to have both wheels on same plane (for spur gears) -
+    /// same sphere (for bevel gears).
+    void SetFrameShaft1(ChFrame<double> mf) { local_shaft1 = mf; }
+
+    /// Get shaft position and direction, for 2nd gear, in body2-relative reference.
+    /// The shaft direction is the Z axis of that frame.
+    const ChFrame<double>& GetFrameShaft2() const { return local_shaft2; }
+
+    /// Set shaft position and direction, for 2nd gear, in body2-relative reference.
+    /// The shaft direction is the Z axis of that frame.
+    void SetFrameShaft2(ChFrame<double> mf) { local_shaft2 = mf; }
+
+    /// Get shaft direction, for 1st gear, in absolute reference
+    ChVector3d GetDirShaft1() const;
+
+    /// Get shaft direction, for 2nd gear, in absolute reference
+    ChVector3d GetDirShaft2() const;
+
+    /// Get shaft position, for 1st gear, in absolute reference
+    ChVector3d GetPosShaft1() const;
+
+    /// Get shaft position, for 2nd gear, in absolute reference
+    ChVector3d GetPosShaft2() const;
+
+    /// Switch to compliant gear teeth contact model.
+    /// Automatically calls SetEnforcePhase(true), needed for compliant teeth.
+    void SetTeethCompliant(bool mset, double mstiffness = 1e4, double mdamping = 1.0);
+
+    /// Switch off compliant gear teeth contact model
+    void SetTeethRigid() { is_compliant = false; }
+
+    /// Is the compliant gear teeth contact model used?
+    bool IsTeethCompliant() const { return is_compliant; }
+
+    /// Set the teeth stiffness [N/m] for compliant gear teeth contact model.
+    /// Automatically calls SetTeethCompliant and SetEnforcePhase(true), needed for compliant teeth.
+    /// Stiffenss assumed in the normal direction of contact (hence inclined by alpha, beta angles),
+    /// and NOT in the tangential direction. If you need to set teeth stiffness purely in
+    /// tangent direction, use SetTeethStiffnessTangential()
+    void SetTeethStiffness(double mstiffness);
+
+    /// Set the teeth stiffness [N/m] for compliant gear teeth contact model.
+    /// Automatically calls SetTeethCompliant and SetEnforcePhase(true), needed for compliant teeth.
+    /// Stiffenss assumed in the tangential direction of contact. The teeth "equivalent normal stiffness"
+    /// will be automatically computed as a consequence of current alpha, beta angles.
+    void SetTeethStiffnessTangential(double mstiffness_tang);
+
+    /// Get the teeth stiffness [N/m] for compliant gear teeth contact model.
+    /// Assumed in the normal direction of contact (hence inclined by alpha, beta angles)
+    double GetTeethStiffness() const { return teeth_stiffness; }
+
+    /// Set the teeth damping [N/(m/s)] for compliant gear teeth contact model.
+    /// Automatically calls SetTeethCompliant and SetEnforcePhase(true), needed for compliant teeth.
+    /// Damping assumed in the normal direction of contact (hence inclined by alpha, beta angles)
+    void SetTeethDamping(double damping);
+
+    /// Get the teeth damping [N/(m/s)] for compliant gear teeth contact model.
+    /// Assumed in the normal direction of contact (hence inclined by alpha, beta angles)
+    double GetTeethDamping() const { return teeth_damping; }
+
+    /// equivalent contact force, about average normal to teeth
+    double GetContactForce();
+
+    // INTERFACE ChPhysicsItem
+
+    /// Takes the F force term, scale and adds to R at given offset:
+    ///    R += c*F
+    virtual void IntLoadResidual_F(const unsigned int off,  ///< offset in R residual
+                                   ChVectorDynamic<>& R,    ///< result: the R residual, R += c*F
+                                   const double c           ///< a scaling factor
+                                   ) override;
+
+    /// Takes the term C, scale and adds to Qc at given offset:
+    ///    Qc += c*C
+    virtual void IntLoadConstraint_C(const unsigned int off,  ///< offset in Qc residual
+                                     ChVectorDynamic<>& Qc,   ///< result: the Qc residual, Qc += c*C
+                                     const double c,          ///< a scaling factor
+                                     bool do_clamp,           ///< apply clamping to c*C?
+                                     double recovery_clamp    ///< value for min/max clamping of c*C
+                                     ) override;
+
+    virtual void IntLoadResidual_CqL(const unsigned int off_L,
+                                     ChVectorDynamic<>& R,
+                                     const ChVectorDynamic<>& L,
+                                     const double c) override;
+
+    /// Note: signs are flipped from the term dF/dx in the integrator: K = -dF/dq and R = -dF/dv.
+    virtual void LoadKRMMatrices(double Kfactor, double Rfactor, double Mfactor) override;
+
+    // SERIALIZATION
+
+    /// Method to allow serialization of transient data to archives.
+    virtual void ArchiveOut(ChArchiveOut& archive_out) override;
+
+    /// Method to allow deserialization of transient data from archives.
+    virtual void ArchiveIn(ChArchiveIn& archive_in) override;
+};
+
+CH_CLASS_VERSION(ChLinkLockGear, 0)
+
+}  // end namespace chrono
+
+#endif
